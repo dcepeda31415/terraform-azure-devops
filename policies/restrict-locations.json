@@ -1,0 +1,31 @@
+{
+  "mode": "All",
+  "policyRule": {
+    "if": {
+      "not": {
+        "field": "location",
+        "in": "[parameters('allowedLocations')]"
+      }
+    },
+    "then": {
+      "effect": "deny"
+    }
+  },
+  "parameters": {
+    "allowedLocations": {
+      "type": "Array",
+      "metadata": {
+        "displayName": "Allowed locations",
+        "description": "List of allowed Azure regions for resource deployment"
+      },
+      "allowedValues": [
+        "westeurope",
+        "northeurope",
+        "francecentral"
+      ],
+      "defaultValue": ["westeurope", "northeurope", "francecentral"]
+    }
+  },
+  "displayName": "Restrict Allowed Locations",
+  "description": "Enforces data residency by restricting resource deployment to approved Azure regions"
+}

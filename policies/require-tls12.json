@@ -1,0 +1,23 @@
+{
+  "mode": "All",
+  "policyRule": {
+    "if": {
+      "allOf": [
+        {
+          "field": "type",
+          "equals": "Microsoft.Storage/storageAccounts"
+        },
+        {
+          "field": "Microsoft.Storage/storageAccounts/minimumTlsVersion",
+          "notEquals": "TLS1_2"
+        }
+      ]
+    },
+    "then": {
+      "effect": "deny"
+    }
+  },
+  "parameters": {},
+  "displayName": "Require TLS 1.2 for Storage Accounts",
+  "description": "Prevents storage accounts with TLS version below 1.2"
+}

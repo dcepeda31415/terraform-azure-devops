@@ -1,0 +1,27 @@
+{
+  "mode": "Indexed",
+  "policyRule": {
+    "if": {
+      "anyOf": [
+        {
+          "field": "tags['environment']",
+          "exists": "false"
+        },
+        {
+          "field": "tags['managed_by']",
+          "exists": "false"
+        },
+        {
+          "field": "tags['project']",
+          "exists": "false"
+        }
+      ]
+    },
+    "then": {
+      "effect": "deny"
+    }
+  },
+  "parameters": {},
+  "displayName": "Require environment, managed_by, and project tags",
+  "description": "All resources must have environment, managed_by, and project tags for cost governance"
+}

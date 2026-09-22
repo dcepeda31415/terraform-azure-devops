@@ -1,0 +1,196 @@
+# =============================================================================
+# Main CI/CD Pipeline -- Infrastructure Automation with Terraform & Azure DevOps
+# Deploys to: dev (develop), staging (staging), prod (main)
+# =============================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+      - staging
+      - develop
+  paths:
+    include:
+      - environments/**
+      - modules/**
+
+pr:
+  branches:
+    include:
+      - main
+      - staging
+      - develop
+
+parameters:
+  - name: targetEnvironment
+    displayName: Target Environment
+    type: string
+    default: dev
+    values: [dev, staging, prod]
+
+variables:
+  TF_VERSION: '1.6.0'
+  - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/main') }}:
+    - group: prod-variables
+    - name: ENVIRONMENT
+      value: prod
+    - name: WORKING_DIR
+      value: environments/prod
+    - name: SERVICE_CONNECTION
+      value: prod-service-connection
+  - ${{ elseif eq(variables['Build.SourceBranch'], 'refs/heads/staging') }}:
+    - group: staging-variables
+    - name: ENVIRONMENT
+      value: staging
+    - name: WORKING_DIR
+      value: environments/staging
+    - name: SERVICE_CONNECTION
+      value: staging-service-connection
+  - ${{ else }}:
+    - group: dev-variables
+    - name: ENVIRONMENT
+      value: dev
+    - name: WORKING_DIR
+      value: environments/dev
+    - name: SERVICE_CONNECTION
+      value: dev-service-connection
+
+stages:
+
+  # ============================================================
+  # Stage 1: Validate -- syntax, security scanning, compliance
+  # ============================================================
+  - stage: Validate
+    displayName: Validate and Security Scan
+    jobs:
+      - job: TerraformValidate
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: TerraformInstaller@1
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - script: |
+              cd $(WORKING_DIR)
+              terraform init -backend=false
+              terraform validate
+            displayName: Terraform validate
+
+          - script: |
+              curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+              tfsec $(WORKING_DIR) --format lovely --minimum-severity HIGH
+            displayName: tfsec security scan
+
+          - script: |
+              pip install checkov
+              checkov -d $(WORKING_DIR) --framework terraform --quiet
+            displayName: Checkov compliance scan
+
+  # ============================================================
+  # Stage 2: Plan -- generate and publish plan artifact
+  # ============================================================
+  - stage: Plan
+    displayName: Terraform Plan
+    dependsOn: Validate
+    jobs:
+      - job: TerraformPlan
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: TerraformInstaller@1
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - task: AzureCLI@2
+            displayName: Terraform Init and Plan
+            inputs:
+              azureSubscription: $(SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                export ARM_CLIENT_ID=$servicePrincipalId
+                export ARM_OIDC_TOKEN=$idToken
+                export ARM_TENANT_ID=$tenantId
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                export ARM_USE_OIDC=true
+
+                cd $(WORKING_DIR)
+                terraform init
+                terraform plan -var-file="terraform.tfvars" -out=tfplan
+
+          - publish: $(WORKING_DIR)/tfplan
+            artifact: terraform-plan-$(ENVIRONMENT)
+            displayName: Publish plan artifact
+
+  # ============================================================
+  # Stage 3: Approve -- manual gate for staging and prod
+  # ============================================================
+  - stage: Approve
+    displayName: Approval Gate
+    dependsOn: Plan
+    condition: |
+      and(
+        succeeded(),
+        or(
+          eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+          eq(variables['Build.SourceBranch'], 'refs/heads/staging')
+        )
+      )
+    jobs:
+      - deployment: ApprovalGate
+        displayName: Awaiting approval
+        pool: server
+        environment: $(ENVIRONMENT)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - script: echo "Deployment to $(ENVIRONMENT) approved"
+
+  # ============================================================
+  # Stage 4: Apply -- download artifact and apply
+  # Critical: uses published plan artifact -- NOT a new plan
+  # ============================================================
+  - stage: Apply
+    displayName: Terraform Apply
+    dependsOn:
+      - Plan
+      - ${{ if or(eq(variables['Build.SourceBranch'], 'refs/heads/main'), eq(variables['Build.SourceBranch'], 'refs/heads/staging')) }}:
+        - Approve
+    condition: succeeded()
+    jobs:
+      - deployment: TerraformApply
+        environment: $(ENVIRONMENT)
+        pool:
+          vmImage: ubuntu-latest
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: TerraformInstaller@1
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - download: current
+                  artifact: terraform-plan-$(ENVIRONMENT)
+                  displayName: Download plan artifact
+
+                - task: AzureCLI@2
+                  displayName: Terraform Apply (plan artifact)
+                  inputs:
+                    azureSubscription: $(SERVICE_CONNECTION)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    addSpnToEnvironment: true
+                    inlineScript: |
+                      export ARM_CLIENT_ID=$servicePrincipalId
+                      export ARM_OIDC_TOKEN=$idToken
+                      export ARM_TENANT_ID=$tenantId
+                      export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                      export ARM_USE_OIDC=true
+
+                      cd $(WORKING_DIR)
+                      terraform init
+                      terraform apply $(Pipeline.Workspace)/terraform-plan-$(ENVIRONMENT)/tfplan
